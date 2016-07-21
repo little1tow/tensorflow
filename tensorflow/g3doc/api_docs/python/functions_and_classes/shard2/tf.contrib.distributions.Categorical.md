@@ -9,7 +9,7 @@ Note, the following methods of the base class aren't implemented:
   * log_cdf
 - - -
 
-#### `tf.contrib.distributions.Categorical.__init__(logits, dtype=tf.int32, strict=True, name='Categorical')` {#Categorical.__init__}
+#### `tf.contrib.distributions.Categorical.__init__(logits, dtype=tf.int32, strict=True, strict_statistics=True, name='Categorical')` {#Categorical.__init__}
 
 Initialize Categorical distributions using class log-probabilities.
 
@@ -22,6 +22,10 @@ Initialize Categorical distributions using class log-probabilities.
       indexes into the classes.
 *  <b>`dtype`</b>: The type of the event samples (default: int32).
 *  <b>`strict`</b>: Unused in this distribution.
+*  <b>`strict_statistics`</b>: Boolean, default True.  If True, raise an exception if
+    a statistic (e.g. mean/mode/etc...) is undefined for any batch member.
+    If False, batch members with valid parameters leading to undefined
+    statistics will return NaN for this statistic.
 *  <b>`name`</b>: A name for this distribution (optional).
 
 
@@ -76,6 +80,13 @@ Cumulative distribution function.
 
 - - -
 
+#### `tf.contrib.distributions.Categorical.is_continuous` {#Categorical.is_continuous}
+
+
+
+
+- - -
+
 #### `tf.contrib.distributions.Categorical.is_reparameterized` {#Categorical.is_reparameterized}
 
 
@@ -90,14 +101,21 @@ Log CDF.
 
 - - -
 
-#### `tf.contrib.distributions.Categorical.log_likelihood(value, name='log_likelihood')` {#Categorical.log_likelihood}
+#### `tf.contrib.distributions.Categorical.log_pdf(value, name='log_pdf')` {#Categorical.log_pdf}
 
-Log likelihood of this distribution (same as log_pmf).
+Log of the probability density function.
 
 
 - - -
 
-#### `tf.contrib.distributions.Categorical.log_pmf(k, name='log_pmf')` {#Categorical.log_pmf}
+#### `tf.contrib.distributions.Categorical.log_pmf(value, name='log_pmf')` {#Categorical.log_pmf}
+
+Log of the probability mass function.
+
+
+- - -
+
+#### `tf.contrib.distributions.Categorical.log_prob(k, name='log_prob')` {#Categorical.log_prob}
 
 Log-probability of class `k`.
 
@@ -149,7 +167,21 @@ Mean of the distribution.
 
 - - -
 
-#### `tf.contrib.distributions.Categorical.pmf(k, name='pmf')` {#Categorical.pmf}
+#### `tf.contrib.distributions.Categorical.pdf(value, name='pdf')` {#Categorical.pdf}
+
+The probability density function.
+
+
+- - -
+
+#### `tf.contrib.distributions.Categorical.pmf(value, name='pmf')` {#Categorical.pmf}
+
+The probability mass function.
+
+
+- - -
+
+#### `tf.contrib.distributions.Categorical.prob(k, name='prob')` {#Categorical.prob}
 
 Probability of class `k`.
 
@@ -194,6 +226,13 @@ Standard deviation of the distribution.
 #### `tf.contrib.distributions.Categorical.strict` {#Categorical.strict}
 
 Boolean describing behavior on invalid input.
+
+
+- - -
+
+#### `tf.contrib.distributions.Categorical.strict_statistics` {#Categorical.strict_statistics}
+
+Boolean describing behavior when a stat is undefined for batch member.
 
 
 - - -

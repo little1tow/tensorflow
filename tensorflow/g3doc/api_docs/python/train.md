@@ -1214,9 +1214,20 @@ except Exception:
 ```
 - - -
 
-#### `tf.train.Coordinator.__init__()` {#Coordinator.__init__}
+#### `tf.train.Coordinator.__init__(clean_stop_exception_types=None)` {#Coordinator.__init__}
 
 Create a new Coordinator.
+
+##### Args:
+
+
+*  <b>`clean_stop_exception_types`</b>: Optional tuple of Exception types that should
+    cause a clean stop of the coordinator. If an exception of one of these
+    types is reported to `request_stop(ex)` the coordinator will behave as
+    if `request_stop(None)` was called.  Defaults to
+    `(tf.errors.OutOfRangeError,)` which is used by input queues to signal
+    the end of input. When feeding training data from a Python iterator it
+    is common to add `StopIteration` to this list.
 
 
 - - -
@@ -1704,7 +1715,7 @@ This method currently blocks forever.
 A training helper that checkpoints models and computes summaries.
 
 The Supervisor is a small wrapper around a `Coordinator`, a `Saver`,
-and a `SessionManager` that takes care of common needs of Tensorflow
+and a `SessionManager` that takes care of common needs of TensorFlow
 training programs.
 
 #### Use for a single program
@@ -1714,7 +1725,7 @@ with tf.Graph().as_default():
   ...add operations to the graph...
   # Create a Supervisor that will checkpoint the model in '/tmp/mydir'.
   sv = Supervisor(logdir='/tmp/mydir')
-  # Get a Tensorflow session managed by the supervisor.
+  # Get a TensorFlow session managed by the supervisor.
   with sv.managed_session(FLAGS.master) as sess:
     # Use the session to train the graph.
     while not sv.should_stop():

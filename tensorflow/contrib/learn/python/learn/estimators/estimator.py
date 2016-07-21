@@ -29,13 +29,14 @@ import numpy as np
 import six
 
 from tensorflow.contrib import framework as contrib_framework
+from tensorflow.contrib import layers
 from tensorflow.contrib.learn.python.learn import graph_actions
 from tensorflow.contrib.learn.python.learn import monitors as monitors_lib
 from tensorflow.contrib.learn.python.learn.estimators import _sklearn as sklearn
 from tensorflow.contrib.learn.python.learn.estimators import run_config
 from tensorflow.contrib.learn.python.learn.estimators import tensor_signature
 from tensorflow.contrib.learn.python.learn.estimators._sklearn import NotFittedError
-from tensorflow.contrib.learn.python.learn.io import data_feeder
+from tensorflow.contrib.learn.python.learn.learn_io import data_feeder
 from tensorflow.contrib.learn.python.learn.utils import checkpoints
 
 from tensorflow.python.framework import ops
@@ -72,6 +73,9 @@ def _get_input_fn(x, y, input_fn, feed_fn, batch_size, shuffle=False, epochs=1):
                                           contrib_framework.is_tensor(y)):
       raise ValueError('Inputs cannot be tensors. Please provide input_fn.')
 
+    if feed_fn is not None:
+      raise ValueError('Can not provide both feed_fn and x or y.')
+
     df = data_feeder.setup_train_data_feeder(x, y, n_classes=None,
                                              batch_size=batch_size,
                                              shuffle=shuffle,
@@ -84,6 +88,41 @@ def _get_input_fn(x, y, input_fn, feed_fn, batch_size, shuffle=False, epochs=1):
     raise ValueError('Can not provide both input_fn and batch_size.')
 
   return input_fn, feed_fn
+
+
+def infer_real_valued_columns_from_input_fn(input_fn):
+  """Creates `FeatureColumn` objects for inputs defined by `input_fn`.
+
+  This interprets all inputs as dense, fixed-length float values. This creates
+  a local graph in which it calls `input_fn` to build the tensors, then discards
+  it.
+
+  Args:
+    input_fn: Function returning a tuple of input and target `Tensor` objects.
+
+  Returns:
+    List of `FeatureColumn` objects.
+  """
+  with ops.Graph().as_default():
+    features, _ = input_fn()
+    return layers.infer_real_valued_columns(features)
+
+
+def infer_real_valued_columns_from_input(x):
+  """Creates `FeatureColumn` objects for inputs defined by input `x`.
+
+  This interprets all inputs as dense, fixed-length float values.
+
+  Args:
+    x: Real-valued matrix of shape [n_samples, n_features...]. Can be
+       iterator that returns arrays of features.
+
+  Returns:
+    List of `FeatureColumn` objects.
+  """
+  input_fn, _ = _get_input_fn(
+      x=x, y=None, input_fn=None, feed_fn=None, batch_size=None)
+  return infer_real_valued_columns_from_input_fn(input_fn)
 
 
 def _get_arguments(func):
@@ -102,7 +141,8 @@ def _get_arguments(func):
 class BaseEstimator(sklearn.BaseEstimator):
   """Abstract BaseEstimator class to train and evaluate TensorFlow models.
 
-  Concrete implementation of this class should provide following functions:
+  Concrete implementation of this class should provide the following functions:
+
     * _get_train_ops
     * _get_eval_ops
     * _get_predict_ops
@@ -155,22 +195,25 @@ class BaseEstimator(sklearn.BaseEstimator):
     """Trains a model given training data `x` predictions and `y` targets.
 
     Args:
-      x: matrix or tensor of shape [n_samples, n_features...]. Can be
-         iterator that returns arrays of features. The training input
-         samples for fitting the model. If set, `input_fn` must be `None`.
-      y: vector or matrix [n_samples] or [n_samples, n_outputs]. Can be
+      x: Matrix of shape [n_samples, n_features...]. Can be iterator that
+         returns arrays of features. The training input samples for fitting the
+         model. If set, `input_fn` must be `None`.
+      y: Vector or matrix [n_samples] or [n_samples, n_outputs]. Can be
          iterator that returns array of targets. The training target values
          (class labels in classification, real numbers in regression). If set,
          `input_fn` must be `None`.
       input_fn: Input function. If set, `x`, `y`, and `batch_size` must be
         `None`.
       steps: Number of steps for which to train model. If `None`, train forever.
+        If set, `max_steps` must be `None`.
       batch_size: minibatch size to use on the input, defaults to first
         dimension of `x`. Must be `None` if `input_fn` is provided.
       monitors: List of `BaseMonitor` subclass instances. Used for callbacks
         inside the training loop.
       max_steps: Number of total steps for which to train model. If `None`,
-        train forever. Two calls to `fit(steps=100)` means 200 training
+        train forever. If set, `steps` must be `None`.
+
+        Two calls to `fit(steps=100)` means 200 training
         iterations. On the other hand, two calls to `fit(max_steps=100)` means
         that the second call will not do any iteration since first call did
         all 100 steps.
@@ -180,8 +223,6 @@ class BaseEstimator(sklearn.BaseEstimator):
 
     Raises:
       ValueError: If `x` or `y` are not `None` while `input_fn` is not `None`.
-      ValueError: If at least one of `x` and `y` is provided, and `input_fn` is
-          provided.
       ValueError: If both `steps` and `max_steps` are not `None`.
     """
     if (steps is not None) and (max_steps is not None):
@@ -212,12 +253,12 @@ class BaseEstimator(sklearn.BaseEstimator):
     to converge, and you want to split up training into subparts.
 
     Args:
-      x: matrix or tensor of shape [n_samples, n_features...]. Can be
-        iterator that returns arrays of features. The training input
-        samples for fitting the model. If set, `input_fn` must be `None`.
-      y: vector or matrix [n_samples] or [n_samples, n_outputs]. Can be
-        iterator that returns array of targets. The training target values
-        (class label in classification, real numbers in regression). If set,
+      x: Matrix of shape [n_samples, n_features...]. Can be iterator that
+         returns arrays of features. The training input samples for fitting the
+         model. If set, `input_fn` must be `None`.
+      y: Vector or matrix [n_samples] or [n_samples, n_outputs]. Can be
+         iterator that returns array of targets. The training target values
+         (class labels in classification, real numbers in regression). If set,
          `input_fn` must be `None`.
       input_fn: Input function. If set, `x`, `y`, and `batch_size` must be
         `None`.
@@ -262,8 +303,13 @@ class BaseEstimator(sklearn.BaseEstimator):
     for which this evaluation was performed.
 
     Args:
-      x: features.
-      y: targets.
+      x: Matrix of shape [n_samples, n_features...]. Can be iterator that
+         returns arrays of features. The training input samples for fitting the
+         model. If set, `input_fn` must be `None`.
+      y: Vector or matrix [n_samples] or [n_samples, n_outputs]. Can be
+         iterator that returns array of targets. The training target values
+         (class labels in classification, real numbers in regression). If set,
+         `input_fn` must be `None`.
       input_fn: Input function. If set, `x`, `y`, and `batch_size` must be
         `None`.
       feed_fn: Function creating a feed dict every time it is called. Called
@@ -273,17 +319,19 @@ class BaseEstimator(sklearn.BaseEstimator):
         provided.
       steps: Number of steps for which to evaluate model. If `None`, evaluate
         until running tensors generated by `metrics` raises an exception.
-      metrics: Dict of metric ops to run. If None, the default metric functions
-        are used; if {}, no metrics are used. If model has one output (i.e.,
-        returning single predction), keys are `str`, e.g. `'accuracy'` - just a
-        name of the metric that will show up in the logs / summaries.
-        Otherwise, keys are tuple of two `str`, e.g. `('accuracy', 'classes')`
-        - name of the metric and name of `Tensor` in the predictions to run
-        this metric on. Metric ops should support streaming, e.g., returning
+      metrics: Dict of metric ops to run. If `None`, the default metric
+        functions are used; if `{}`, no metrics are used. If model has one
+        output (i.e., returning single predction), keys are `str`, e.g.
+        `'accuracy'` - just a name of the metric that will show up in
+        the logs / summaries. Otherwise, keys are tuple of two `str`, e.g.
+        `('accuracy', 'classes')`- name of the metric and name of `Tensor` in
+        the predictions to run this metric on.
+
+        Metric ops should support streaming, e.g., returning
         update_op and value tensors. See more details in
         ../../../../metrics/python/metrics/ops/streaming_metrics.py.
-      name: Name of the evaluation if user needs to run multiple evaluation on
-        different data sets, such as evaluate on training data vs test data.
+      name: Name of the evaluation if user needs to run multiple evaluations on
+        different data sets, such as on training data vs test data.
 
     Returns:
       Returns `dict` with evaluation results.
@@ -312,11 +360,14 @@ class BaseEstimator(sklearn.BaseEstimator):
     """Returns predictions for given features.
 
     Args:
-      x: Features. If set, `input_fn` must be `None`.
-      input_fn: Input function. If set, `x` must be `None`.
-      batch_size: Override default batch size.
+      x: Matrix of shape [n_samples, n_features...]. Can be iterator that
+         returns arrays of features. The training input samples for fitting the
+         model. If set, `input_fn` must be `None`.
+      input_fn: Input function. If set, `x` and 'batch_size' must be `None`.
+      batch_size: Override default batch size. If set, 'input_fn' must be
+        'None'.
       outputs: list of `str`, name of the output to predict.
-               If `None`, returns all.
+        If `None`, returns all.
 
     Returns:
       Numpy array of predicted classes or regression values.
@@ -656,20 +707,23 @@ class Estimator(BaseEstimator):
       model_fn: Model function, takes features and targets tensors or dicts of
                 tensors and returns predictions and loss tensors.
                 Supports next three signatures for the function:
-                  * `(features, targets) -> (predictions, loss, train_op)`
-                  * `(features, targets, mode) -> (predictions, loss, train_op)`
-                  * `(features, targets, mode, params) ->
-                      (predictions, loss, train_op)`
-                Where:
-                  * `features` are single `Tensor` or `dict` of `Tensor`s
-                       (depending on data passed to `fit`),
-                  * `targets` are `Tensor` or
-                      `dict` of `Tensor`s (for multi-head model).
-                  * `mode` represents if this training, evaluation or
-                      prediction. See `ModeKeys` for example keys.
-                  * `params` is a `dict` of hyperparameters. Will receive what
-                      is passed to Estimator in `params` parameter. This allows
-                      to configure Estimators from hyper parameter tunning.
+
+          * `(features, targets) -> (predictions, loss, train_op)`
+          * `(features, targets, mode) -> (predictions, loss, train_op)`
+          * `(features, targets, mode, params) -> (predictions, loss, train_op)`
+
+      Where
+
+          * `features` are single `Tensor` or `dict` of `Tensor`s
+                 (depending on data passed to `fit`),
+          * `targets` are `Tensor` or
+                 `dict` of `Tensor`s (for multi-head model).
+          * `mode` represents if this training, evaluation or
+                 prediction. See `ModeKeys` for example keys.
+          * `params` is a `dict` of hyperparameters. Will receive what
+                 is passed to Estimator in `params` parameter. This allows
+                 to configure Estimators from hyper parameter tunning.
+
       model_dir: Directory to save model parameters, graph and etc.
       config: Configuration object.
       params: `dict` of hyper parameters that will be passed into `model_fn`.
