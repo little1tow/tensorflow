@@ -1,14 +1,17 @@
 # TensorFlow external dependencies that can be loaded in WORKSPACE files.
 
+load("//third_party/gpus:cuda_configure.bzl", "cuda_configure")
+
 # If TensorFlow is linked as a submodule, path_prefix is TensorFlow's directory
 # within the workspace (e.g. "tensorflow/"), and tf_repo_name is the name of the
 # local_repository rule (e.g. "@tf").
 def tf_workspace(path_prefix = "", tf_repo_name = ""):
+  cuda_configure(name = "local_config_cuda")
 
   # These lines need to be changed when updating Eigen. They are parsed from
   # this file by the cmake and make builds to determine the eigen version and hash.
-  eigen_version = "b4fa9622b809"
-  eigen_sha256 = "2862840c2de9c0473a4ef20f8678949ae89ab25965352ee53329e63ba46cec62"
+  eigen_version = "9e1b48c333aa"
+  eigen_sha256 = "ad2c990401a0b5529324e000737569f5f60d827f38586d5e02490252b3325c11"
 
   native.new_http_archive(
     name = "eigen_archive",
@@ -27,7 +30,7 @@ def tf_workspace(path_prefix = "", tf_repo_name = ""):
   native.git_repository(
     name = "gemmlowp",
     remote = "https://github.com/google/gemmlowp.git",
-    commit = "96d3acab46fbb03855ca22c2ee2bb9831ac8c83c",
+    commit = "8b20dd2ce142115857220bd6a35e8a081b3e0829",
   )
 
   native.new_http_archive(
@@ -90,7 +93,7 @@ def tf_workspace(path_prefix = "", tf_repo_name = ""):
 
   native.new_http_archive(
     name = "gmock_archive",
-    url = "https://archive.openswitch.net/gmock-1.7.0.zip",
+    url = "http://pkgs.fedoraproject.org/repo/pkgs/gmock/gmock-1.7.0.zip/073b984d8798ea1594f5e44d85b20d66/gmock-1.7.0.zip",
     sha256 = "26fcbb5925b74ad5fc8c26b0495dfc96353f4d553492eb97e85a8a6d2f43095b",
     build_file = path_prefix + "gmock.BUILD",
   )
@@ -106,8 +109,8 @@ def tf_workspace(path_prefix = "", tf_repo_name = ""):
   )
 
   native.bind(
-      name = "python_headers",
-      actual = tf_repo_name + "//util/python:python_headers",
+    name = "python_headers",
+    actual = tf_repo_name + "//util/python:python_headers",
   )
 
   # grpc expects //external:protobuf_clib and //external:protobuf_compiler
@@ -124,7 +127,7 @@ def tf_workspace(path_prefix = "", tf_repo_name = ""):
 
   native.new_git_repository(
     name = "grpc",
-    commit = "39650266",
+    commit = "d7ff4ff40071d2b486a052183e3e9f9382afb745",
     init_submodules = True,
     remote = "https://github.com/grpc/grpc.git",
     build_file = path_prefix + "grpc.BUILD",
@@ -155,9 +158,9 @@ def tf_workspace(path_prefix = "", tf_repo_name = ""):
   )
 
   native.git_repository(
-      name = "boringssl_git",
-      remote = "https://github.com/google/boringssl.git",
-      commit = "bbcaa15b0647816b9a1a9b9e0d209cd6712f0105",  # 2016-07-11
+    name = "boringssl_git",
+    remote = "https://github.com/google/boringssl.git",
+    commit = "bbcaa15b0647816b9a1a9b9e0d209cd6712f0105",  # 2016-07-11
   )
 
   native.new_git_repository(

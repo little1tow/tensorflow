@@ -48,10 +48,11 @@ limitations under the License.
 #include "tensorflow/core/lib/core/threadpool.h"
 #include "tensorflow/core/lib/gtl/array_slice.h"
 #include "tensorflow/core/lib/gtl/stl_util.h"
+#include "tensorflow/core/lib/monitoring/counter.h"
 #include "tensorflow/core/lib/strings/numbers.h"
 #include "tensorflow/core/lib/strings/str_util.h"
 #include "tensorflow/core/lib/strings/strcat.h"
-#include "tensorflow/core/platform/host_info.h"
+#include "tensorflow/core/platform/cpu_info.h"
 #include "tensorflow/core/platform/logging.h"
 #include "tensorflow/core/platform/mutex.h"
 #include "tensorflow/core/platform/types.h"
@@ -60,6 +61,10 @@ limitations under the License.
 namespace tensorflow {
 
 namespace {
+
+auto* direct_session_runs = monitoring::Counter<0>::New(
+    "/tensorflow/core/direct_session_runs",
+    "The number of times DirectSession::Run() has been called.");
 
 int32 NumInterOpThreadsFromSessionOptions(const SessionOptions& options) {
   const int32 t = options.config.inter_op_parallelism_threads();
@@ -262,6 +267,7 @@ Status DirectSession::Run(const RunOptions& run_options,
                           const std::vector<string>& target_nodes,
                           std::vector<Tensor>* outputs,
                           RunMetadata* run_metadata) {
+  direct_session_runs->GetCell()->IncrementBy(1);
   {
     mutex_lock l(graph_def_lock_);
     if (!graph_created_) {
@@ -284,18 +290,16 @@ Status DirectSession::Run(const RunOptions& run_options,
   }
   thread::ThreadPool* pool = thread_pools_[run_options.inter_op_thread_pool()];
 
-  // EXPERIMENTAL: Options that allow the client to insert nodes into partition
-  // graphs for debugging.
-  if (!run_options.debug_tensor_watch_opts().empty()) {
-    debug_node_inserter_.reset(
-        new DebugNodeInserter(run_options.debug_tensor_watch_opts()));
-  } else {
-    debug_node_inserter_.reset(nullptr);
-  }
-
   // Check if we already have an executor for these arguments.
   ExecutorsAndKeys* executors_and_keys;
   RunStateArgs run_state_args;
+
+  // EXPERIMENTAL: Options that allow the client to insert nodes into partition
+  // graphs for debugging.
+  if (!run_options.debug_tensor_watch_opts().empty()) {
+    run_state_args.debug_tensor_watches = run_options.debug_tensor_watch_opts();
+  }
+
   TF_RETURN_IF_ERROR(
       GetOrCreateExecutors(pool, input_tensor_names, output_names, target_nodes,
                            &executors_and_keys, &run_state_args));
@@ -327,6 +331,7 @@ Status DirectSession::Run(const RunOptions& run_options,
   };
   args.session_state = &session_state_;
   args.tensor_store = &run_state.tensor_store;
+  args.step_resource_manager = &run_state.step_resource_manager;
   if (LogMemory::IsEnabled()) {
     LogMemory::RecordStep(args.step_id, run_state_args.handle);
   }
@@ -388,6 +393,18 @@ Status DirectSession::Run(const RunOptions& run_options,
           cost_model_manager_.AddToCostGraphDef(item.graph, cost_graph));
     }
   }
+
+  // If requested via RunOptions, output the partition graphs.
+  if (run_options.output_partition_graphs()) {
+    protobuf::RepeatedPtrField<GraphDef>* parition_graph_defs =
+        run_metadata->mutable_partition_graphs();
+    for (const PerPartitionExecutorsAndLib& exec_and_lib :
+         executors_and_keys->items) {
+      GraphDef* partition_graph_def = parition_graph_defs->Add();
+      exec_and_lib.graph->ToGraphDef(partition_graph_def);
+    }
+  }
+
   return Status::OK();
 }
 
@@ -448,6 +465,7 @@ Status DirectSession::PRunSetup(const std::vector<string>& input_names,
   };
   args.session_state = &session_state_;
   args.tensor_store = &run_state->tensor_store;
+  args.step_resource_manager = &run_state->step_resource_manager;
   if (LogMemory::IsEnabled()) {
     LogMemory::RecordStep(args.step_id, run_state_args.handle);
   }
@@ -732,12 +750,14 @@ Status DirectSession::GetOrCreateExecutors(
   options.fetch_endpoints = outputs_sorted;
   options.target_nodes = tn_sorted;
 
+  std::unique_ptr<ExecutorsAndKeys> ek(new ExecutorsAndKeys);
+
   // The executor_lock_ is intentionally released while executor is
   // being created.
   std::unordered_map<string, std::unique_ptr<Graph>> graphs;
-  TF_RETURN_IF_ERROR(CreateGraphs(options, &graphs, run_state_args));
+  TF_RETURN_IF_ERROR(
+      CreateGraphs(options, &graphs, &ek->flib_def, run_state_args));
 
-  std::unique_ptr<ExecutorsAndKeys> ek(new ExecutorsAndKeys);
   if (run_state_args->is_partial_run) {
     ek->graph = std::move(run_state_args->graph);
     std::unordered_set<StringPiece, StringPiece::Hasher> names;
@@ -769,9 +789,9 @@ Status DirectSession::GetOrCreateExecutors(
 
     ek->items.resize(ek->items.size() + 1);
     auto* item = &(ek->items.back());
-    item->flib.reset(
-        NewFunctionLibraryRuntime(device_mgr_.get(), device, graph_def_version,
-                                  flib_def_.get(), optimizer_opts));
+    item->flib.reset(NewFunctionLibraryRuntime(
+        device_mgr_.get(), options_.env, device, graph_def_version,
+        ek->flib_def.get(), optimizer_opts));
 
     LocalExecutorParams params;
     params.device = device;
@@ -802,12 +822,13 @@ Status DirectSession::GetOrCreateExecutors(
     params.node_outputs_cb = node_outputs_callback_;
 
     partition_graph = iter->second.release();
-    optimizer.Optimize(lib, device, &partition_graph);
+    optimizer.Optimize(lib, options_.env, device, &partition_graph);
 
     // EXPERIMENTAL: tfdb inserts debug nodes (i.e., probes) to the graph
-    if (debug_node_inserter_) {
+    if (!run_state_args->debug_tensor_watches.empty()) {
       TF_RETURN_IF_ERROR(
-          debug_node_inserter_->InsertNodes(partition_graph, params.device));
+          DebugNodeInserter::InsertNodes(run_state_args->debug_tensor_watches,
+                                         partition_graph, params.device));
     }
     iter->second.reset(partition_graph);
 
@@ -849,6 +870,7 @@ Status DirectSession::GetOrCreateExecutors(
 Status DirectSession::CreateGraphs(
     const BuildGraphOptions& options,
     std::unordered_map<string, std::unique_ptr<Graph>>* outputs,
+    std::unique_ptr<FunctionLibraryDefinition>* flib_def,
     RunStateArgs* run_state_args) {
   mutex_lock l(graph_def_lock_);
   std::unique_ptr<SimpleClientGraph> client_graph;
@@ -965,7 +987,8 @@ Status DirectSession::CreateGraphs(
     if (!s.ok()) {
       break;
     }
-    std::unique_ptr<Graph> device_graph(new Graph(flib_def_.get()));
+    std::unique_ptr<Graph> device_graph(
+        new Graph(client_graph->flib_def.get()));
     GraphConstructorOptions device_opts;
     // There are internal operations (e.g., send/recv) that we now
     // allow.
@@ -975,6 +998,7 @@ Status DirectSession::CreateGraphs(
         ConvertGraphDefToGraph(device_opts, *graph_def, device_graph.get()));
     outputs->emplace(partition_name, std::move(device_graph));
   }
+  *flib_def = std::move(client_graph->flib_def);
   return s;
 }
 
@@ -1041,8 +1065,13 @@ class DirectSessionFactory : public SessionFactory {
       EnableCPUAllocatorFullStats(true);
     }
     std::vector<Device*> devices;
-    DeviceFactory::AddDevices(options, "/job:localhost/replica:0/task:0",
-                              &devices);
+    Status s = DeviceFactory::AddDevices(
+        options, "/job:localhost/replica:0/task:0", &devices);
+    if (!s.ok()) {
+      LOG(ERROR) << s;
+      return nullptr;
+    }
+
     return new DirectSession(options, new DeviceMgr(devices));
   }
 };

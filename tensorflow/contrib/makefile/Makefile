@@ -19,6 +19,28 @@ HAS_GEN_HOST_PROTOC := \
 $(shell test -f $(MAKEFILE_DIR)/gen/protobuf-host/bin/protoc && echo "true" ||\
 echo "false")
 
+# Hexagon integration
+ifdef HEXAGON_LIBS
+	LIBGEMM_WRAPPER := $(HEXAGON_LIBS)/libgemm_wrapper.so
+	ifeq ($(shell test -f $(LIBGEMM_WRAPPER) 2> /dev/null; echo $$?), 0)
+    $(info "Use hexagon libs at " $(LIBGEMM_WRAPPER))
+	else
+    $(error "hexagon libs not found at " $(LIBGEMM_WRAPPER))
+	endif
+	ifdef HEXAGON_INCLUDE
+		ifeq ($(shell test -d $(HEXAGON_INCLUDE) 2> /dev/null; echo $$?), 0)
+      $(info "Use hexagon libs at " $(HEXAGON_INCLUDE))
+		else
+      $(error "hexagon libs not found at " $(HEXAGON_INCLUDE))
+		endif
+	else
+    $(error "HEXAGON_INCLUDE is not set.")
+	endif
+	ifneq ($(TARGET),ANDROID)
+    $(error "hexagon is only supported on Android")
+	endif
+endif # HEXAGON_LIBS
+
 # Try to figure out the host system
 HOST_OS :=
 ifeq ($(OS),Windows_NT)
@@ -39,7 +61,7 @@ HOST_BINDIR := $(MAKEFILE_DIR)/gen/host_bin/
 HOST_GENDIR := $(MAKEFILE_DIR)/gen/host_obj/
 
 # Find the current Eigen version from the Bazel configuration
-EIGEN_VERSION := $(shell grep eigen_version tensorflow/workspace.bzl | head -1 | sed -e 's/.*eigen_version\s*=\s*"\(.*\)"/\1/')
+EIGEN_VERSION := $(shell grep eigen_version tensorflow/workspace.bzl | head -1 | sed -e 's/.*eigen_version.*=.*"\(.*\)"/\1/')
 
 # Settings for the host compiler.
 HOST_CXX := $(CC_PREFIX) gcc
@@ -112,6 +134,8 @@ LIBDIR := $(GENDIR)lib/
 BINDIR := $(GENDIR)bin/
 PBTGENDIR := $(GENDIR)proto_text/
 PROTOGENDIR := $(GENDIR)proto/
+DEPDIR := $(GENDIR)dep/
+$(shell mkdir -p $(DEPDIR) >/dev/null)
 
 # Settings for the target compiler.
 CXX := $(CC_PREFIX) gcc
@@ -119,6 +143,7 @@ OPTFLAGS := -O0
 CXXFLAGS := --std=c++11 -DIS_SLIM_BUILD $(OPTFLAGS)
 LDFLAGS := \
 -L/usr/local/lib
+DEPFLAGS = -MT $@ -MMD -MP -MF $(DEPDIR)/$*.Td
 
 INCLUDES := \
 -I. \
@@ -180,6 +205,7 @@ ifeq ($(TARGET),ANDROID)
 # NDK_ROOT=/path/to/your/ndk
 # You need to have an Android version of the protobuf libraries compiled to link
 # in. The compile_android_protobuf.sh script may help.
+# TODO(satok): Support all CPU architectures (Currently only armv7 is supported)
 
 	OS_PATH :=
 	ifeq ($(HOST_OS),LINUX)
@@ -189,16 +215,16 @@ ifeq ($(TARGET),ANDROID)
 		OS_PATH=darwin
 	endif
 	ifeq ($(HOST_OS),WINDOWS)
-		$(error "windows is not supported.")
+    $(error "windows is not supported.")
 	endif
 
 	ifndef NDK_ROOT
-		$(error "NDK_ROOT is not defined.")
+    $(error "NDK_ROOT is not defined.")
 	endif
 	CXX := $(CC_PREFIX) $(NDK_ROOT)/toolchains/arm-linux-androideabi-4.9/prebuilt/$(OS_PATH)-x86_64/bin/arm-linux-androideabi-g++
 	CXXFLAGS +=\
 --sysroot $(NDK_ROOT)/platforms/android-21/arch-arm \
--Wno-c++11-narrowing \
+-Wno-narrowing \
 -march=armv7-a \
 -fPIE
 
@@ -221,6 +247,7 @@ ifeq ($(TARGET),ANDROID)
 -lm
 
 	LD := $(NDK_ROOT)/toolchains/arm-linux-androideabi-4.9/prebuilt/$(OS_PATH)-x86_64/arm-linux-androideabi/bin/ld
+
 	LDFLAGS := \
 -march=armv7-a \
 -L$(MAKEFILE_DIR)/gen/protobuf/lib \
@@ -232,6 +259,12 @@ ifeq ($(TARGET),ANDROID)
 	AR := $(NDK_ROOT)/toolchains/arm-linux-androideabi-4.9/prebuilt/$(OS_PATH)-x86_64/bin/arm-linux-androideabi-ar
 	ARFLAGS := r
 	LIBFLAGS += -Wl,--allow-multiple-definition -Wl,--whole-archive
+
+	ifdef HEXAGON_LIBS
+		INCLUDES += -I$(HEXAGON_INCLUDE)
+		LIBS += -lgemm_wrapper
+		LDFLAGS += -L$(HEXAGON_LIBS)
+	endif
 
 endif  # ANDROID
 
@@ -251,6 +284,7 @@ ifeq ($(TARGET),IOS)
 		CXXFLAGS += -miphoneos-version-min=$(MIN_SDK_VERSION) \
 		-arch armv7 \
 		-D__thread= \
+		-DUSE_GEMM_FOR_CONV \
 		-Wno-c++11-narrowing \
 		-mno-thumb \
 		-DTF_LEAN_BINARY \
@@ -261,6 +295,7 @@ ifeq ($(TARGET),IOS)
 		${IPHONEOS_SYSROOT}
 		LDFLAGS := -arch armv7 \
 		-miphoneos-version-min=${MIN_SDK_VERSION} \
+		-framework Accelerate \
 		-Xlinker -S \
 		-Xlinker -x \
 		-Xlinker -dead_strip \
@@ -272,6 +307,7 @@ ifeq ($(TARGET),IOS)
 		CXXFLAGS += -miphoneos-version-min=$(MIN_SDK_VERSION) \
 		-arch armv7s \
 		-D__thread= \
+		-DUSE_GEMM_FOR_CONV \
 		-Wno-c++11-narrowing \
 		-mno-thumb \
 		-DTF_LEAN_BINARY \
@@ -282,6 +318,7 @@ ifeq ($(TARGET),IOS)
 		${IPHONEOS_SYSROOT}
 		LDFLAGS := -arch armv7s \
 		-miphoneos-version-min=${MIN_SDK_VERSION} \
+		-framework Accelerate \
 		-Xlinker -S \
 		-Xlinker -x \
 		-Xlinker -dead_strip \
@@ -293,6 +330,7 @@ ifeq ($(TARGET),IOS)
 		CXXFLAGS += -miphoneos-version-min=$(MIN_SDK_VERSION) \
 		-arch arm64 \
 		-D__thread= \
+		-DUSE_GEMM_FOR_CONV \
 		-Wno-c++11-narrowing \
 		-DTF_LEAN_BINARY \
 		-D__ANDROID_TYPES_SLIM__ \
@@ -302,6 +340,7 @@ ifeq ($(TARGET),IOS)
 		${IPHONEOS_SYSROOT}
 		LDFLAGS := -arch arm64 \
 		-miphoneos-version-min=${MIN_SDK_VERSION} \
+		-framework Accelerate \
 		-Xlinker -S \
 		-Xlinker -x \
 		-Xlinker -dead_strip \
@@ -313,6 +352,7 @@ ifeq ($(TARGET),IOS)
 		CXXFLAGS += -mios-simulator-version-min=$(MIN_SDK_VERSION) \
 		-arch i386 \
 		-D__thread= \
+		-DUSE_GEMM_FOR_CONV \
 		-Wno-c++11-narrowing \
 		-DTF_LEAN_BINARY \
 		-D__ANDROID_TYPES_SLIM__ \
@@ -322,6 +362,7 @@ ifeq ($(TARGET),IOS)
 		${IPHONESIMULATOR_SYSROOT}
 		LDFLAGS := -arch i386 \
 		-mios-simulator-version-min=${MIN_SDK_VERSION} \
+		-framework Accelerate \
 		-Xlinker -S \
 		-Xlinker -x \
 		-Xlinker -dead_strip \
@@ -333,6 +374,7 @@ ifeq ($(TARGET),IOS)
 		CXXFLAGS += -mios-simulator-version-min=$(MIN_SDK_VERSION) \
 		-arch x86_64 \
 		-D__thread= \
+		-DUSE_GEMM_FOR_CONV \
 		-Wno-c++11-narrowing \
 		-DTF_LEAN_BINARY \
 		-D__ANDROID_TYPES_SLIM__ \
@@ -342,6 +384,7 @@ ifeq ($(TARGET),IOS)
 		${IPHONESIMULATOR_SYSROOT}
 		LDFLAGS := -arch x86_64 \
 		-mios-simulator-version-min=${MIN_SDK_VERSION} \
+		-framework Accelerate \
 		-Xlinker -S \
 		-Xlinker -x \
 		-Xlinker -dead_strip \
@@ -349,6 +392,10 @@ ifeq ($(TARGET),IOS)
 		-L$(GENDIR)protobuf_ios/lib \
 		-lz
 	endif
+	OBJDIR := $(OBJDIR)ios_$(IOS_ARCH)/
+	LIBDIR := $(LIBDIR)ios_$(IOS_ARCH)/
+	BINDIR := $(BINDIR)ios_$(IOS_ARCH)/
+	DEPDIR := $(DEPDIR)ios_$(IOS_ARCH)/
 endif
 
 # This library is the main target for this makefile. It will contain a minimal
@@ -386,10 +433,8 @@ $(wildcard tensorflow/core/graph/dot.*) \
 $(wildcard tensorflow/core/lib/gif/*) \
 $(wildcard tensorflow/core/lib/jpeg/*) \
 $(wildcard tensorflow/core/lib/png/*) \
-$(wildcard tensorflow/core/util/checkpoint_reader.*) \
 $(wildcard tensorflow/core/util/events_writer.*) \
 $(wildcard tensorflow/core/util/reporter.*) \
-$(wildcard tensorflow/core/util/tf_status_helper.*) \
 $(wildcard tensorflow/core/platform/default/stream_executor.*) \
 $(wildcard tensorflow/core/platform/default/test_benchmark.*) \
 $(wildcard tensorflow/core/platform/cuda.h) \
@@ -444,7 +489,9 @@ $(BENCHMARK_NAME): $(BENCHMARK_OBJS) $(LIB_PATH)
 # Matches on the normal hand-written TensorFlow C++ source files.
 $(OBJDIR)%.o: %.cc | $(PBT_GEN_FILES)
 	@mkdir -p $(dir $@)
-	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+	@mkdir -p $(dir $(DEPDIR)$*)
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) -c $< -o $@
+	@mv -f $(DEPDIR)/$*.Td $(DEPDIR)/$*.d
 
 # Compiles C++ source files that have been generated by protoc.
 $(OBJDIR)%.pb.o: $(PROTOGENDIR)%.pb.cc
@@ -511,3 +558,13 @@ clean:
 cleantarget:
 	rm -rf $(OBJDIR)
 	rm -rf $(BINDIR)
+
+$(DEPDIR)/%.d: ;
+.PRECIOUS: $(DEPDIR)/%.d
+
+-include $(patsubst %,$(DEPDIR)/%.d,$(basename $(TF_CC_SRCS)))
+
+ifdef SUB_MAKEFILES
+  $(warning "include sub makefiles, must not contain white spaces in the path:" $(SUB_MAKEFILES))
+  include $(SUB_MAKEFILES)
+endif

@@ -53,17 +53,21 @@ from tensorflow.python.platform import tf_logging as logging
 class ForestHParams(object):
   """A base class for holding hyperparameters and calculating good defaults."""
 
-  def __init__(self, num_trees=100, max_nodes=10000, bagging_fraction=1.0,
-               max_depth=0, num_splits_to_consider=0,
+  def __init__(self,
+               num_trees=100,
+               max_nodes=10000,
+               bagging_fraction=1.0,
+               num_splits_to_consider=0,
                feature_bagging_fraction=1.0,
-               max_fertile_nodes=0, split_after_samples=250,
+               max_fertile_nodes=0,
+               split_after_samples=250,
                min_split_samples=5,
-               valid_leaf_threshold=1, **kwargs):
+               valid_leaf_threshold=1,
+               **kwargs):
     self.num_trees = num_trees
     self.max_nodes = max_nodes
     self.bagging_fraction = bagging_fraction
     self.feature_bagging_fraction = feature_bagging_fraction
-    self.max_depth = max_depth
     self.num_splits_to_consider = num_splits_to_consider
     self.max_fertile_nodes = max_fertile_nodes
     self.split_after_samples = split_after_samples
@@ -100,10 +104,6 @@ class ForestHParams(object):
     # Add an extra column to classes for storing counts, which is needed for
     # regression and avoids having to recompute sums for classification.
     self.num_output_columns = self.num_classes + 1
-
-    # Allow each tree to be unbalanced by up to a factor of 2.
-    self.max_depth = (self.max_depth or
-                      int(2 * math.ceil(math.log(self.max_nodes, 2))))
 
     # The Random Forest literature recommends sqrt(# features) for
     # classification problems, and p/3 for regression problems.
@@ -160,11 +160,6 @@ class TreeTrainingVariables(object):
         name=self.get_tree_name('tree_thresholds', tree_num),
         shape=[params.max_nodes],
         initializer=init_ops.constant_initializer(-1.0))
-    self.tree_depths = variable_scope.get_variable(
-        name=self.get_tree_name('tree_depths', tree_num),
-        shape=[params.max_nodes],
-        dtype=dtypes.int32,
-        initializer=init_ops.constant_initializer(1))
     self.end_of_tree = variable_scope.get_variable(
         name=self.get_tree_name('end_of_tree', tree_num),
         dtype=dtypes.int32,
@@ -347,8 +342,7 @@ class RandomForestGraphs(object):
     Returns:
       The last op in the random forest training graph.
     """
-    data_spec = ([constants.DATA_FLOAT] * self.params.num_features
-                 if data_spec is None else data_spec)
+    data_spec = [constants.DATA_FLOAT] if data_spec is None else data_spec
     tree_graphs = []
     for i in range(self.params.num_trees):
       with ops.device(self.device_assigner.get_device(i)):
@@ -385,27 +379,27 @@ class RandomForestGraphs(object):
 
     return control_flow_ops.group(*tree_graphs, name='train')
 
-  def inference_graph(self, input_data, data_spec=None):
+  def inference_graph(self, input_data, data_spec=None, **inference_args):
     """Constructs a TF graph for evaluating a random forest.
 
     Args:
       input_data: A tensor or SparseTensor or placeholder for input data.
       data_spec: A list of tf.dtype values specifying the original types of
         each column.
+      **inference_args: Keyword arguments to pass through to each tree.
 
     Returns:
       The last op in the random forest inference graph.
     """
-    data_spec = ([constants.DATA_FLOAT] * self.params.num_features
-                 if data_spec is None else data_spec)
+    data_spec = [constants.DATA_FLOAT] if data_spec is None else data_spec
     probabilities = []
     for i in range(self.params.num_trees):
       with ops.device(self.device_assigner.get_device(i)):
         tree_data = input_data
         if self.params.bagged_features:
           tree_data = self._bag_features(i, input_data)
-        probabilities.append(self.trees[i].inference_graph(tree_data,
-                                                           data_spec))
+        probabilities.append(self.trees[i].inference_graph(
+            tree_data, data_spec, **inference_args))
     with ops.device(self.device_assigner.get_device(0)):
       all_predict = array_ops.pack(probabilities)
       return math_ops.div(
@@ -422,7 +416,7 @@ class RandomForestGraphs(object):
     for i in range(self.params.num_trees):
       with ops.device(self.device_assigner.get_device(i)):
         sizes.append(self.trees[i].size())
-    return math_ops.reduce_mean(array_ops.pack(sizes))
+    return math_ops.reduce_mean(math_ops.to_float(array_ops.pack(sizes)))
 
   # pylint: disable=unused-argument
   def training_loss(self, features, labels):
@@ -532,8 +526,13 @@ class RandomTreeGraphs(object):
 
     return math_ops.reduce_sum(e_x2 - math_ops.square(e_x), 1)
 
-  def training_graph(self, input_data, input_labels, random_seed,
-                     data_spec, epoch=None):
+  def training_graph(self,
+                     input_data,
+                     input_labels,
+                     random_seed,
+                     data_spec,
+                     epoch=None,
+                     input_weights=None):
 
     """Constructs a TF graph for training a random tree.
 
@@ -546,11 +545,16 @@ class RandomTreeGraphs(object):
       data_spec: A list of tf.dtype values specifying the original types of
         each column.
       epoch: A tensor or placeholder for the epoch the training data comes from.
+      input_weights: A float tensor or placeholder holding per-input weights,
+        or None if all inputs are to be weighted equally.
 
     Returns:
       The last op in the random tree training graph.
     """
     epoch = [0] if epoch is None else epoch
+
+    if input_weights is None:
+      input_weights = []
 
     sparse_indices = []
     sparse_values = []
@@ -562,19 +566,25 @@ class RandomTreeGraphs(object):
       input_data = []
 
     # Count extremely random stats.
-    (node_sums, node_squares, splits_indices, splits_sums,
-     splits_squares, totals_indices, totals_sums,
-     totals_squares, input_leaves) = (
-         self.training_ops.count_extremely_random_stats(
-             input_data, sparse_indices, sparse_values, sparse_shape,
-             data_spec, input_labels, self.variables.tree,
-             self.variables.tree_thresholds,
-             self.variables.node_to_accumulator_map,
-             self.variables.candidate_split_features,
-             self.variables.candidate_split_thresholds,
-             self.variables.start_epoch, epoch,
-             num_classes=self.params.num_output_columns,
-             regression=self.params.regression))
+    (node_sums, node_squares, splits_indices, splits_sums, splits_squares,
+     totals_indices, totals_sums, totals_squares,
+     input_leaves) = (self.training_ops.count_extremely_random_stats(
+         input_data,
+         sparse_indices,
+         sparse_values,
+         sparse_shape,
+         data_spec,
+         input_labels,
+         input_weights,
+         self.variables.tree,
+         self.variables.tree_thresholds,
+         self.variables.node_to_accumulator_map,
+         self.variables.candidate_split_features,
+         self.variables.candidate_split_thresholds,
+         self.variables.start_epoch,
+         epoch,
+         num_classes=self.params.num_output_columns,
+         regression=self.params.regression))
     node_update_ops = []
     node_update_ops.append(
         state_ops.assign_add(self.variables.node_sums, node_sums))
@@ -660,37 +670,34 @@ class RandomTreeGraphs(object):
 
     # Grow tree.
     with ops.control_dependencies([update_features_op, update_thresholds_op]):
-      (tree_update_indices, tree_children_updates,
-       tree_threshold_updates, tree_depth_updates, new_eot) = (
-           self.training_ops.grow_tree(
-               self.variables.end_of_tree, self.variables.tree_depths,
-               self.variables.node_to_accumulator_map, finished, split_indices,
-               self.variables.candidate_split_features,
-               self.variables.candidate_split_thresholds))
+      (tree_update_indices, tree_children_updates, tree_threshold_updates,
+       new_eot) = (self.training_ops.grow_tree(
+           self.variables.end_of_tree, self.variables.node_to_accumulator_map,
+           finished, split_indices, self.variables.candidate_split_features,
+           self.variables.candidate_split_thresholds))
       tree_update_op = state_ops.scatter_update(
           self.variables.tree, tree_update_indices, tree_children_updates)
       thresholds_update_op = state_ops.scatter_update(
           self.variables.tree_thresholds, tree_update_indices,
           tree_threshold_updates)
-      depth_update_op = state_ops.scatter_update(
-          self.variables.tree_depths, tree_update_indices, tree_depth_updates)
       # TODO(thomaswc): Only update the epoch on the new leaves.
-      new_epoch_updates = epoch * array_ops.ones_like(tree_depth_updates)
+      new_epoch_updates = epoch * array_ops.ones_like(tree_threshold_updates,
+                                                      dtype=dtypes.int32)
       epoch_update_op = state_ops.scatter_update(
           self.variables.start_epoch, tree_update_indices,
           new_epoch_updates)
 
     # Update fertile slots.
-    with ops.control_dependencies([depth_update_op]):
+    with ops.control_dependencies([tree_update_op]):
       (node_map_updates, accumulators_cleared, accumulators_allocated) = (
           self.training_ops.update_fertile_slots(
-              finished, non_fertile_leaves,
+              finished,
+              non_fertile_leaves,
               non_fertile_leaf_scores,
-              self.variables.end_of_tree, self.variables.tree_depths,
+              self.variables.end_of_tree,
               self.variables.accumulator_sums,
               self.variables.node_to_accumulator_map,
               stale,
-              max_depth=self.params.max_depth,
               regression=self.params.regression))
 
     # Ensure end_of_tree doesn't get updated until UpdateFertileSlots has

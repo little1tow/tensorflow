@@ -1,4 +1,4 @@
-Abstract base class for probability distributions.
+Fully-featured abstract base class for probability distributions.
 
 This class defines the API for probability distributions. Users will only ever
 instantiate subclasses of `Distribution`.
@@ -21,15 +21,16 @@ All distributions support batches of independent distributions of that type.
 The batch shape is determined by broadcasting together the parameters.
 
 The shape of arguments to `__init__`, `cdf`, `log_cdf`, `prob`, and
-`log_prob` reflect this broadcasting, as does the return value of `sample`.
+`log_prob` reflect this broadcasting, as does the return value of `sample` and
+`sample_n`.
 
-`sample_shape = (n,) + batch_shape + event_shape`, where `sample_shape` is the
-shape of the `Tensor` returned from `sample`, `n` is the number of samples,
-`batch_shape` defines how many independent distributions there are, and
-`event_shape` defines the shape of samples from each of those independent
-distributions. Samples are independent along the `batch_shape` dimensions,
-but not necessarily so along the `event_shape` dimensions (dependending on
-the particulars of the underlying distribution).
+`sample_n_shape = (n,) + batch_shape + event_shape`, where `sample_n_shape` is
+the shape of the `Tensor` returned from `sample_n`, `n` is the number of
+samples, `batch_shape` defines how many independent distributions there are,
+and `event_shape` defines the shape of samples from each of those independent
+distributions. Samples are independent along the `batch_shape` dimensions, but
+not necessarily so along the `event_shape` dimensions (dependending on the
+particulars of the underlying distribution).
 
 Using the `Uniform` distribution as an example:
 
@@ -51,7 +52,7 @@ event_shape_t = u.event_shape
 # Sampling returns a sample per distribution.  `samples` has shape
 # (5, 2, 2), which is (n,) + batch_shape + event_shape, where n=5,
 # batch_shape=(2, 2), and event_shape=().
-samples = u.sample(5)
+samples = u.sample_n(5)
 
 # The broadcasting holds across methods. Here we use `cdf` as an example. The
 # same holds for `log_cdf` and the likelihood functions.
@@ -83,11 +84,11 @@ a = tf.exp(tf.matmul(logits, weights_a))
 b = tf.exp(tf.matmul(logits, weights_b))
 
 # Will raise exception if ANY batch member has a < 1 or b < 1.
-dist = distributions.beta(a, b, strict_statistics=True)  # default is True
+dist = distributions.beta(a, b, allow_nan_stats=False)  # default is False
 mode = dist.mode().eval()
 
 # Will return NaN for batch members with either a < 1 or b < 1.
-dist = distributions.beta(a, b, strict_statistics=False)
+dist = distributions.beta(a, b, allow_nan_stats=True)
 mode = dist.mode().eval()
 ```
 
@@ -96,9 +97,16 @@ In all cases, an exception is raised if *invalid* parameters are passed, e.g.
 ```python
 # Will raise an exception if any Op is run.
 negative_a = -1.0 * a  # beta distribution by definition has a > 0.
-dist = distributions.beta(negative_a, b, strict_statistics=False)
+dist = distributions.beta(negative_a, b, allow_nan_stats=True)
 dist.mean().eval()
 ```
+- - -
+
+#### `tf.contrib.distributions.Distribution.allow_nan_stats` {#Distribution.allow_nan_stats}
+
+Boolean describing behavior when a stat is undefined for batch member.
+
+
 - - -
 
 #### `tf.contrib.distributions.Distribution.batch_shape(name='batch_shape')` {#Distribution.batch_shape}
@@ -153,6 +161,63 @@ Shape of a sample from a single distribution as a 1-D int32 `Tensor`.
 ##### Returns:
 
   `Tensor` `event_shape`
+
+
+- - -
+
+#### `tf.contrib.distributions.Distribution.from_params(cls, make_safe=True, **kwargs)` {#Distribution.from_params}
+
+Given (unconstrained) parameters, return an instantiated distribution.
+
+Subclasses should implement a static method `_safe_transforms` that returns
+a dict of parameter transforms, which will be used if `make_safe = True`.
+
+Example usage:
+
+```
+# Let's say we want a sample of size (batch_size, 10)
+shapes = MultiVariateNormalDiag.param_shapes([batch_size, 10])
+
+# shapes has a Tensor shape for mu and sigma
+# shapes == {
+#   'mu': tf.constant([batch_size, 10]),
+#   'sigma': tf.constant([batch_size, 10]),
+# }
+
+# Here we parameterize mu and sigma with the output of a linear
+# layer. Note that sigma is unconstrained.
+params = {}
+for name, shape in shapes.items():
+  params[name] = linear(x, shape[1])
+
+# Note that you can forward other kwargs to the `Distribution`, like
+# `allow_nan_stats` or `name`.
+mvn = MultiVariateNormalDiag.from_params(**params, allow_nan_stats=True)
+```
+
+Distribution parameters may have constraints (e.g. `sigma` must be positive
+for a `Normal` distribution) and the `from_params` method will apply default
+parameter transforms. If a user wants to use their own transform, they can
+apply it externally and set `make_safe=False`.
+
+##### Args:
+
+
+*  <b>`make_safe`</b>: Whether the `params` should be constrained. If True,
+    `from_params` will apply default parameter transforms. If False, no
+    parameter transforms will be applied.
+*  <b>`**kwargs`</b>: dict of parameters for the distribution.
+
+##### Returns:
+
+  A distribution parameterized by possibly transformed parameters in
+  `kwargs`.
+
+##### Raises:
+
+
+*  <b>`TypeError`</b>: if `make_safe` is `True` but `_safe_transforms` is not
+    implemented directly for `cls`.
 
 
 - - -
@@ -238,6 +303,48 @@ Name to prepend to all ops.
 
 - - -
 
+#### `tf.contrib.distributions.Distribution.param_shapes(cls, sample_shape, name='DistributionParamShapes')` {#Distribution.param_shapes}
+
+Shapes of parameters given the desired shape of a call to `sample()`.
+
+Subclasses should override static method `_param_shapes`.
+
+##### Args:
+
+
+*  <b>`sample_shape`</b>: `Tensor` or python list/tuple. Desired shape of a call to
+    `sample()`.
+*  <b>`name`</b>: name to prepend ops with.
+
+##### Returns:
+
+  `dict` of parameter name to `Tensor` shapes.
+
+
+- - -
+
+#### `tf.contrib.distributions.Distribution.param_static_shapes(cls, sample_shape)` {#Distribution.param_static_shapes}
+
+param_shapes with static (i.e. TensorShape) shapes.
+
+##### Args:
+
+
+*  <b>`sample_shape`</b>: `TensorShape` or python list/tuple. Desired shape of a call
+    to `sample()`.
+
+##### Returns:
+
+  `dict` of parameter name to `TensorShape`.
+
+##### Raises:
+
+
+*  <b>`ValueError`</b>: if `sample_shape` is a `TensorShape` and is not fully defined.
+
+
+- - -
+
 #### `tf.contrib.distributions.Distribution.pdf(value, name='pdf')` {#Distribution.pdf}
 
 The probability density function.
@@ -259,7 +366,30 @@ Probability density/mass function.
 
 - - -
 
-#### `tf.contrib.distributions.Distribution.sample(n, seed=None, name='sample')` {#Distribution.sample}
+#### `tf.contrib.distributions.Distribution.sample(sample_shape=(), seed=None, name='sample')` {#Distribution.sample}
+
+Generate samples of the specified shape for each batched distribution.
+
+Note that a call to `sample()` without arguments will generate a single
+sample per batched distribution.
+
+##### Args:
+
+
+*  <b>`sample_shape`</b>: Rank 1 `int32` `Tensor`. Shape of the generated samples.
+*  <b>`seed`</b>: Python integer seed for RNG
+*  <b>`name`</b>: name to give to the op.
+
+##### Returns:
+
+
+*  <b>`samples`</b>: a `Tensor` of dtype `self.dtype` and shape
+      `sample_shape + self.batch_shape + self.event_shape`.
+
+
+- - -
+
+#### `tf.contrib.distributions.Distribution.sample_n(n, seed=None, name='sample_n')` {#Distribution.sample_n}
 
 Generate `n` samples.
 
@@ -286,16 +416,9 @@ Standard deviation of the distribution.
 
 - - -
 
-#### `tf.contrib.distributions.Distribution.strict` {#Distribution.strict}
+#### `tf.contrib.distributions.Distribution.validate_args` {#Distribution.validate_args}
 
 Boolean describing behavior on invalid input.
-
-
-- - -
-
-#### `tf.contrib.distributions.Distribution.strict_statistics` {#Distribution.strict_statistics}
-
-Boolean describing behavior when a stat is undefined for batch member.
 
 
 - - -
